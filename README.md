@@ -1,53 +1,31 @@
 # @openclaw/wecom
 
-OpenClaw 企业微信 (WeCom) 渠道插件 — WebSocket AI Bot + 微信客服集成。
+OpenClaw 企业微信渠道插件 — 零公网 IP，两分钟上线。
 
-**零公网 IP、零运维。** 和飞书插件一样，使用 WebSocket 长连接，在家里的电脑上就能跑。
+## 两种模式
 
-## 两种集成模式
-
-### Plan A: 企业微信 AI Bot (核心)
-
-通过 `@wecom/aibot-node-sdk` 建立 WebSocket 长连接：
-
-```
-你的电脑 (OpenClaw) ──WebSocket出站──▶ wss://openws.work.weixin.qq.com ──▶ 企业微信
-```
-
-- 无需公网 IP（WebSocket 出站连接）
-- 支持文本、图片、语音、文件、图文混排消息
-- 原生流式回复（Markdown 逐字显示）
-- 模板卡片交互（按钮、投票、多选）
-- 断线自动重连（指数退避）
-- 加密文件 AES-256-CBC 自动解密
-
-### Plan B: 微信客服 (WeChat KF)
-
-让个人微信用户无需安装企业微信，扫码即可对话：
-
-```
-个人微信用户 ──扫码绑定──▶ 微信客服会话 ──API──▶ OpenClaw AI
-```
-
-- QR 码绑定，零门槛
-- 普通微信用户直接使用
-- 通过企业微信「微信客服」API 桥接
+| 模式 | 谁能用 | 需要什么 | 连接方式 |
+|------|--------|---------|---------|
+| **WeCom AI Bot** | 企业微信用户 | Bot ID + Secret | WebSocket 出站 (无需公网 IP) |
+| **WeChat KF** | 个人微信用户 | Corp ID + Secret + KF ID | HTTP API 轮询 |
 
 ## 快速开始
 
-### 1. 创建企业微信 AI Bot
+### 1. 创建机器人 (2 分钟)
 
-1. 登录 [企业微信管理后台](https://work.weixin.qq.com)
-2. 应用管理 → 创建"智能机器人"（AI Bot 类型）
-3. 记录 **Bot ID** 和 **Bot Secret**
+1. [企业微信管理后台](https://work.weixin.qq.com) → 应用管理 → 创建 **智能机器人**
+2. 复制 **Bot ID** 和 **Secret**
 
-### 2. 安装插件
+### 2. 安装 & 配置
 
 ```bash
 openclaw plugins install @openclaw/wecom
 ```
 
-### 3. 配置
+```bash
+# 存储密钥 (自动写入 .env，不会进版本控制)
+echo "WECOM_BOT_SECRET=你的Secret" >> .env
+```
 
 在 `openclaw.json` 中添加：
 
@@ -55,155 +33,95 @@ openclaw plugins install @openclaw/wecom
 {
   "channels": {
     "wecom": {
-      "enabled": true,
-      "botId": "<你的 Bot ID>",
+      "botId": "你的BotID",
       "botSecret": { "env": "WECOM_BOT_SECRET" }
     }
   }
 }
 ```
 
-将 Bot Secret 存入环境变量：
-
-```bash
-echo "WECOM_BOT_SECRET=<你的 Secret>" >> ~/.env
-```
-
-### 4. 启动
+### 3. 启动
 
 ```bash
 openclaw gateway restart
 ```
 
-在企业微信中找到你的机器人，发一条消息测试。
+在企业微信找到你的机器人，发消息测试。
 
-## 微信客服配置（可选）
+---
 
-要让个人微信用户也能使用，在配置中启用 WeChat KF：
+### 开启微信客服 (可选，让个人微信用户也能用)
+
+额外需要 3 个值：
+
+| 值 | 在哪找 |
+|----|--------|
+| Corp ID | 管理后台 → 我的企业 → 企业ID |
+| Corp Secret | 创建应用 → Secret (需「微信客服」权限) |
+| KF Account ID | 微信客服 → 客服账号 → open_kfid |
 
 ```json
 {
   "channels": {
     "wecom": {
-      "enabled": true,
-      "botId": "<Bot ID>",
+      "botId": "...",
       "botSecret": { "env": "WECOM_BOT_SECRET" },
       "wechatKf": {
         "enabled": true,
-        "corpId": "<Corp ID>",
+        "corpId": "你的企业ID",
         "corpSecret": { "env": "WECOM_KF_SECRET" },
-        "kfAccountId": "<KF Account ID>"
+        "kfAccountId": "你的KF账号ID"
       }
     }
   }
 }
 ```
 
-启动后会生成绑定二维码，微信扫码即可开始对话。
+启动后日志会输出客服链接，分享给微信用户或生成二维码。
+
+## 它做了什么
+
+```
+你的电脑 ──WebSocket出站──▶ wss://openws.work.weixin.qq.com ──▶ 企业微信用户
+                                                                    ↑ 无需公网IP
+个人微信 ──微信客服会话──▶ qyapi.weixin.qq.com ──HTTP轮询──▶ 你的电脑
+```
+
+- 基于官方 [`@wecom/aibot-node-sdk`](https://github.com/WecomTeam/aibot-node-sdk) (MIT)
+- 支持文本/图片/语音/文件/图文混排
+- 原生流式回复 (Markdown 逐字显示)
+- 模板卡片 (5 种类型)
+- 加密文件自动 AES-256-CBC 解密
+- 断线自动重连 (指数退避，无限重试)
+- 消息去重 (防止重连后重复处理)
+- 多账号支持
 
 ## 配置参考
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| `enabled` | boolean | `true` | 启用/禁用 |
-| `botId` | string | — | Bot ID（必填） |
-| `botSecret` | string \| { env } | — | Bot Secret（必填） |
-| `aesKey` | string \| { env } | — | AES 密钥（文件解密用） |
-| `connectionMode` | `"websocket"` \| `"webhook"` | `"websocket"` | 连接模式 |
-| `wsUrl` | string | — | 自定义 WebSocket URL（测试用） |
-| `dmPolicy` | `"open"` \| `"pairing"` \| `"allowlist"` | `"pairing"` | 私聊策略 |
-| `groupPolicy` | `"open"` \| `"allowlist"` \| `"disabled"` | `"allowlist"` | 群聊策略 |
-| `requireMention` | boolean | `true` | 群聊中是否需要 @机器人 |
-| `wechatKf.enabled` | boolean | `false` | 启用微信客服 |
-| `wechatKf.corpId` | string | — | 企业 Corp ID |
-| `wechatKf.corpSecret` | string \| { env } | — | 客服 Scope 的 Secret |
-| `wechatKf.kfAccountId` | string | — | 客服账号 ID |
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `botId` | — | **必填** Bot ID |
+| `botSecret` | — | **必填** Bot Secret (建议用 `{ "env": "..." }`) |
+| `aesKey` | — | 文件解密密钥 (收图片/文件时需要) |
+| `connectionMode` | `"websocket"` | 连接模式 |
+| `dmPolicy` | `"pairing"` | 私聊策略: open / pairing / allowlist |
+| `groupPolicy` | `"allowlist"` | 群聊策略: open / allowlist / disabled |
+| `requireMention` | `true` | 群聊是否需要 @机器人 |
+| `wechatKf.enabled` | `false` | 启用微信客服 |
+| `wechatKf.corpId` | — | 企业 Corp ID |
+| `wechatKf.corpSecret` | — | 客服 Scope 的 Secret |
+| `wechatKf.kfAccountId` | — | 客服账号 ID |
 
-## 多账号支持
+## 相关项目
 
-```json
-{
-  "channels": {
-    "wecom": {
-      "defaultAccount": "production",
-      "accounts": {
-        "production": {
-          "enabled": true,
-          "botId": "<Prod Bot ID>",
-          "botSecret": { "env": "WECOM_PROD_SECRET" }
-        },
-        "staging": {
-          "enabled": true,
-          "botId": "<Staging Bot ID>",
-          "botSecret": { "env": "WECOM_STAGING_SECRET" }
-        }
-      }
-    }
-  }
-}
-```
+- [WecomTeam/aibot-node-sdk](https://github.com/WecomTeam/aibot-node-sdk) — 官方 SDK (本插件基础)
+- [BytePioneer-AI/openclaw-china](https://github.com/BytePioneer-AI/openclaw-china) — 社区多平台套件 (HTTP 回调模式)
+- [sunnoy/openclaw-plugin-wecom](https://github.com/sunnoy/openclaw-plugin-wecom) — 高级群聊管理
+- [StyXxxxxxx/openclaw-wecom-aibot](https://github.com/StyXxxxxxx/openclaw-wecom-aibot) — 另一个 WebSocket 实现
 
-## 支持的消息类型
+## 给 AI Agent 看的
 
-| 方向 | 类型 | 支持 |
-|------|------|------|
-| 接收 | 文本 | ✅ |
-| 接收 | 图片 | ✅ (AES 解密) |
-| 接收 | 语音 | ✅ (AES 解密) |
-| 接收 | 文件 | ✅ (AES 解密) |
-| 接收 | 图文混排 | ✅ |
-| 发送 | Markdown 文本 | ✅ |
-| 发送 | 流式 Markdown | ✅ (逐字显示) |
-| 发送 | 模板卡片 | ✅ (5 种类型) |
-| 发送 | 流式 + 卡片 | ✅ |
-| 发送 | 主动推送 | ✅ |
-| 发送 | 欢迎语 | ✅ |
-
-## 与飞书插件的对比
-
-| 特性 | @openclaw/feishu | @openclaw/wecom |
-|------|-----------------|-----------------|
-| 连接方式 | WebSocket 长连接 | WebSocket 长连接 |
-| 需要公网 IP | ❌ | ❌ |
-| 流式回复 | Card streaming API | 原生 stream 协议 |
-| 模板卡片 | ✅ | ✅ (5 种) |
-| 文件加密 | ❌ | ✅ AES-256-CBC |
-| 微信客服 | ❌ | ✅ QR 码绑定 |
-| 个人微信用户 | ❌ | ✅ 通过客服 |
-| 文档/Wiki 工具 | ✅ | 🚧 待实现 |
-| Emoji 表情 | ✅ | ❌ |
-
-## 架构
-
-```
-┌─────────────────────────────────────────────┐
-│                  OpenClaw                    │
-│                                             │
-│  ┌──────────────────────────────────────┐   │
-│  │        @openclaw/wecom plugin        │   │
-│  │                                      │   │
-│  │  ┌──────────┐    ┌───────────────┐   │   │
-│  │  │ AI Bot   │    │  WeChat KF    │   │   │
-│  │  │ Gateway  │    │  Gateway      │   │   │
-│  │  │          │    │               │   │   │
-│  │  │ WSClient │    │ HTTP Polling  │   │   │
-│  │  └────┬─────┘    └───────┬───────┘   │   │
-│  └───────┼──────────────────┼───────────┘   │
-│          │                  │               │
-└──────────┼──────────────────┼───────────────┘
-           │                  │
-    WebSocket 出站      HTTPS API
-           │                  │
-           ▼                  ▼
-   ┌───────────────┐  ┌──────────────┐
-   │ 企业微信       │  │ 微信客服 API  │
-   │ AI Bot 云端    │  │              │
-   │               │  │ ┌──────────┐ │
-   │ ┌───────────┐ │  │ │个人微信   │ │
-   │ │企业微信用户│ │  │ │用户      │ │
-   │ └───────────┘ │  │ └──────────┘ │
-   └───────────────┘  └──────────────┘
-```
+如果你是 AI Agent 正在实现 WeCom 集成，请先阅读 [`AGENTS.md`](./AGENTS.md)。
 
 ## License
 

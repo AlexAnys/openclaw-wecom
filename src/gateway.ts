@@ -8,8 +8,9 @@
 import { WSClient } from "@wecom/aibot-node-sdk";
 import { resolveWeComAccount, resolveWeComCredentials } from "./accounts.js";
 import { parseMessageFrame, parseEventFrame, buildSessionKey } from "./bot.js";
+import { MessageDedup } from "./dedup.js";
 import { registerWeComClient, unregisterWeComClient, sendWelcomeMessage } from "./send.js";
-import type { WeComConfig, WeComMessageContext } from "./types.js";
+import type { WeComConfig } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Types for gateway context (provided by OpenClaw runtime)
@@ -28,7 +29,8 @@ export interface WeComGatewayContext {
       senderName?: string;
       text: string;
       accountId: string;
-      chatType: "p2p" | "group";
+      /** OpenClaw standard: "direct" or "channel". */
+      chatType: "direct" | "channel";
       metadata?: Record<string, unknown>;
     }) => Promise<void>;
     /** Update channel runtime status. */
@@ -72,6 +74,9 @@ export async function startWeComGateway(
     `[wecom:${accountId}] Starting WebSocket gateway (botId: ${creds.botId.slice(0, 8)}...)`,
   );
 
+  // Message deduplication — prevents double-processing on reconnect
+  const dedup = new MessageDedup();
+
   const client = new WSClient({
     botId: creds.botId,
     secret: creds.botSecret,
@@ -113,7 +118,7 @@ export async function startWeComGateway(
   // --- Message handling ---
 
   client.on("message", (frame: Record<string, unknown>) => {
-    void handleInboundMessage(ctx, accountId, frame);
+    void handleInboundMessage(ctx, accountId, frame, dedup);
   });
 
   // --- Event handling ---
@@ -136,6 +141,7 @@ export async function startWeComGateway(
 
   const cleanup = () => {
     log?.info(`[wecom:${accountId}] Shutting down gateway`);
+    dedup.dispose();
     client.disconnect();
     unregisterWeComClient(accountId);
     runtime.setStatus?.({ accountId, status: "stopped" });
@@ -158,16 +164,34 @@ async function handleInboundMessage(
   ctx: WeComGatewayContext,
   accountId: string,
   frame: Record<string, unknown>,
+  dedup: MessageDedup,
 ): Promise<void> {
-  const { runtime, log } = ctx;
+  const { cfg, runtime, log } = ctx;
 
   const msgCtx = parseMessageFrame(frame);
   if (!msgCtx) {
-    log?.debug(
-      `[wecom:${accountId}] Skipping unparseable message frame`,
-    );
+    log?.debug(`[wecom:${accountId}] Skipping unparseable message frame`);
     return;
   }
+
+  // --- Deduplication ---
+  if (dedup.isDuplicate(msgCtx.msgId)) {
+    log?.debug(`[wecom:${accountId}] Skipping duplicate msgId: ${msgCtx.msgId}`);
+    return;
+  }
+
+  // --- Policy enforcement ---
+  const wecomCfg = cfg.channels?.wecom;
+  if (msgCtx.chatType === "group") {
+    const groupPolicy = wecomCfg?.groupPolicy ?? "allowlist";
+    if (groupPolicy === "disabled") {
+      log?.debug(`[wecom:${accountId}] Group messages disabled by policy`);
+      return;
+    }
+  }
+
+  // Map WeCom chat type → OpenClaw standard
+  const chatType = msgCtx.chatType === "group" ? "channel" : "direct";
 
   const sessionKey = buildSessionKey({
     accountId,
@@ -203,19 +227,17 @@ async function handleInboundMessage(
       senderId: msgCtx.fromUserId,
       text,
       accountId,
-      chatType: msgCtx.chatType,
+      chatType,
       metadata: {
         msgId: msgCtx.msgId,
         msgType: msgCtx.msgType,
         chatId: msgCtx.chatId,
-        rawFrame: msgCtx.rawFrame,
+        // Sanitize: pass only the req_id, not the full frame
+        reqId: (frame as Record<string, Record<string, unknown>>).headers?.req_id,
         imageUrl: msgCtx.imageUrl,
-        imageAesKey: msgCtx.imageAesKey,
         fileUrl: msgCtx.fileUrl,
-        fileAesKey: msgCtx.fileAesKey,
         fileName: msgCtx.fileName,
         voiceUrl: msgCtx.voiceUrl,
-        voiceAesKey: msgCtx.voiceAesKey,
       },
     });
   } catch (err) {
@@ -246,7 +268,7 @@ async function handleEnterChat(
     await sendWelcomeMessage({
       accountId,
       frame,
-      text: "👋 Hi! I'm your AI assistant powered by OpenClaw. Send me a message to get started.",
+      text: "Hi! I'm your AI assistant powered by OpenClaw. Send me a message to get started.",
     });
   } catch (err) {
     log?.debug(

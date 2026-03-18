@@ -1,7 +1,8 @@
 node_modules/
 dist/
 *.js
-*.d.ts
+# Ignore generated .d.ts but keep our ambient declarations
+dist/**/*.d.ts
 *.map
 !index.ts
 .env

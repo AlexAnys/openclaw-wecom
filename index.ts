@@ -79,12 +79,16 @@ export {
   buildSessionKey,
 } from "./src/bot.js";
 
+// Dedup
+export { MessageDedup } from "./src/dedup.js";
+
 // Gateway
 export { startWeComGateway, type WeComGatewayContext } from "./src/gateway.js";
 
 // WeChat KF (Plan B)
 export {
   getKfAccessToken,
+  invalidateKfToken,
   getKfContactLink,
   syncKfMessages,
   sendKfMessage,

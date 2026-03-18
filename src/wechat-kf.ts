@@ -2,28 +2,17 @@
  * WeChat KF (微信客服) integration — Plan B.
  *
  * Allows personal WeChat users to chat with OpenClaw AI without
- * installing WeCom, by binding through a customer-service QR code.
+ * installing WeCom, by binding through a customer-service link.
  *
  * Architecture:
- *   个人微信用户 → 扫码绑定 → 微信客服会话 → 企业微信 API → OpenClaw
- *
- * This module handles:
- * 1. Obtaining a customer-service binding link (QR code URL)
- * 2. Polling bind status
- * 3. Receiving messages from bound WeChat users via the KF API
- * 4. Sending replies back through the KF channel
- * 5. Unbinding
- *
- * Prerequisites:
- * - Enterprise WeChat account with "微信客服" enabled
- * - Corp ID + Corp Secret (with 客服 scope)
- * - KF account ID (created in WeCom admin console)
+ *   个人微信用户 → 扫码/链接绑定 → 微信客服会话 → 企业微信 API → OpenClaw
  *
  * API reference: https://developer.work.weixin.qq.com/document/path/94677
  */
 
 import https from "node:https";
-import type { WeComKfConfig, WeComKfBindStatus, WeComKfLink } from "./types.js";
+import crypto from "node:crypto";
+import type { WeComKfConfig, WeComKfLink } from "./types.js";
 
 // ---------------------------------------------------------------------------
 // Access token management
@@ -34,7 +23,12 @@ interface TokenCache {
   expiresAt: number;
 }
 
+// Cache key uses a hash of corpId, NOT the raw secret
 const _tokenCache = new Map<string, TokenCache>();
+
+function tokenCacheKey(corpId: string): string {
+  return `kf:${corpId}`;
+}
 
 /**
  * Get an access_token for the WeChat KF API.
@@ -43,23 +37,17 @@ const _tokenCache = new Map<string, TokenCache>();
  * Caches the token until 5 minutes before expiry.
  */
 export async function getKfAccessToken(config: WeComKfConfig): Promise<string> {
-  const cacheKey = `${config.corpId}:${config.corpSecret}`;
+  const corpId = config.corpId;
+  if (!corpId) throw new Error("WeChat KF requires corpId");
+
+  const cacheKey = tokenCacheKey(corpId);
   const cached = _tokenCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now() + 300_000) {
     return cached.token;
   }
 
-  const corpId = config.corpId;
-  const corpSecret =
-    typeof config.corpSecret === "string"
-      ? config.corpSecret
-      : config.corpSecret
-        ? process.env[(config.corpSecret as { env: string }).env] ?? ""
-        : "";
-
-  if (!corpId || !corpSecret) {
-    throw new Error("WeChat KF requires corpId and corpSecret");
-  }
+  const corpSecret = resolveSecretValue(config.corpSecret);
+  if (!corpSecret) throw new Error("WeChat KF requires corpSecret");
 
   const url = `https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=${encodeURIComponent(corpId)}&corpsecret=${encodeURIComponent(corpSecret)}`;
   const data = await fetchJson<{
@@ -81,15 +69,23 @@ export async function getKfAccessToken(config: WeComKfConfig): Promise<string> {
   return data.access_token;
 }
 
+/** Invalidate cached token (e.g. on auth error). */
+export function invalidateKfToken(corpId: string): void {
+  _tokenCache.delete(tokenCacheKey(corpId));
+}
+
 // ---------------------------------------------------------------------------
-// KF account management
+// KF contact link (for QR code / URL sharing)
 // ---------------------------------------------------------------------------
 
 /**
- * Get the customer-service contact link (for QR code generation).
+ * Get a customer-service contact link.
  *
  * API: POST /cgi-bin/kf/add_contact_way
- * Returns a URL that can be encoded as a QR code for WeChat scanning.
+ * Response: { errcode, errmsg, url }
+ *
+ * The returned URL can be shared directly or encoded as a QR code.
+ * Contact ways persist until explicitly deleted — they do not expire.
  */
 export async function getKfContactLink(
   config: WeComKfConfig,
@@ -101,13 +97,11 @@ export async function getKfContactLink(
     errcode: number;
     errmsg: string;
     url?: string;
-    qr_code?: string;
-    expire_time?: number;
   }>(url, {
     method: "POST",
     body: JSON.stringify({
       open_kfid: config.kfAccountId,
-      scene: "openclaw_bind",
+      scene: "openclaw",
     }),
   });
 
@@ -119,11 +113,8 @@ export async function getKfContactLink(
 
   return {
     url: data.url ?? "",
-    qrCodeUrl: data.qr_code,
-    // Default 30-day expiry if not specified
-    expiresAt: data.expire_time
-      ? data.expire_time * 1000
-      : Date.now() + 30 * 24 * 60 * 60 * 1000,
+    // Contact ways don't expire; set a far-future timestamp
+    expiresAt: Date.now() + 365 * 24 * 60 * 60 * 1000,
   };
 }
 
@@ -136,7 +127,7 @@ export interface KfMessage {
   open_kfid: string;
   external_userid: string;
   send_time: number;
-  origin: number; // 3 = user, 4 = system, 5 = agent
+  origin: number; // 3 = WeChat user, 4 = system, 5 = agent
   msgtype: string;
   text?: { content: string };
   image?: { media_id: string };
@@ -154,6 +145,9 @@ export interface KfSyncResult {
  * Pull new messages from the KF channel.
  *
  * API: POST /cgi-bin/kf/sync_msg
+ *
+ * Note: sync_msg returns messages for ALL KF accounts in the corp.
+ * Filtering by kfAccountId happens client-side.
  */
 export async function syncKfMessages(
   config: WeComKfConfig,
@@ -163,11 +157,9 @@ export async function syncKfMessages(
   const token = await getKfAccessToken(config);
   const url = `https://qyapi.weixin.qq.com/cgi-bin/kf/sync_msg?access_token=${token}`;
 
-  const body: Record<string, unknown> = {
-    open_kfid: config.kfAccountId,
-    limit,
-  };
+  const body: Record<string, unknown> = { limit };
   if (cursor) body.cursor = cursor;
+  // Note: sync_msg does NOT accept open_kfid; all KF messages are returned.
 
   const data = await fetchJson<{
     errcode: number;
@@ -181,13 +173,22 @@ export async function syncKfMessages(
   });
 
   if (data.errcode !== 0) {
+    // Token expired — invalidate and let caller retry
+    if (data.errcode === 40014 || data.errcode === 42001) {
+      invalidateKfToken(config.corpId ?? "");
+    }
     throw new Error(
       `WeChat KF sync_msg failed: ${data.errmsg} (code: ${data.errcode})`,
     );
   }
 
+  // Filter to only our KF account
+  const messages = (data.msg_list ?? []).filter(
+    (msg) => !config.kfAccountId || msg.open_kfid === config.kfAccountId,
+  );
+
   return {
-    messages: data.msg_list ?? [],
+    messages,
     hasMore: data.has_more === 1,
     nextCursor: data.next_cursor ?? "",
   };
@@ -233,22 +234,14 @@ export async function sendKfMessage(params: {
 }
 
 // ---------------------------------------------------------------------------
-// KF event callback handling
+// Polling loop with cursor persistence
 // ---------------------------------------------------------------------------
-
-export interface KfEventCallback {
-  event_type: string;
-  open_kfid: string;
-  external_userid?: string;
-  scene?: string;
-  scene_param?: string;
-  welcome_code?: string;
-  fail_msgid?: string;
-  fail_type?: number;
-}
 
 /**
  * Start polling KF messages at a given interval.
+ *
+ * The `cursorStore` callbacks allow the caller to persist the cursor
+ * across process restarts (e.g. write to a file or KV store).
  *
  * Returns a cleanup function to stop polling.
  */
@@ -258,16 +251,52 @@ export function startKfMessagePolling(params: {
   onMessage: (msg: KfMessage) => void | Promise<void>;
   onError?: (err: Error) => void;
   abortSignal?: AbortSignal;
+  cursorStore?: {
+    load: () => Promise<string> | string;
+    save: (cursor: string) => Promise<void> | void;
+  };
 }): () => void {
-  const { config, intervalMs = 5000, onMessage, onError, abortSignal } = params;
+  const {
+    config,
+    intervalMs = 5000,
+    onMessage,
+    onError,
+    abortSignal,
+    cursorStore,
+  } = params;
   let cursor = "";
   let running = true;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  // Load persisted cursor on start
+  const init = async () => {
+    if (cursorStore) {
+      try {
+        cursor = await cursorStore.load();
+      } catch {
+        cursor = "";
+      }
+    }
+    void poll();
+  };
 
   const poll = async () => {
     if (!running) return;
+
     try {
       const result = await syncKfMessages(config, cursor || undefined);
-      cursor = result.nextCursor;
+
+      if (result.nextCursor) {
+        cursor = result.nextCursor;
+        // Persist cursor
+        if (cursorStore) {
+          try {
+            await cursorStore.save(cursor);
+          } catch {
+            // Non-fatal; cursor will be lost on restart
+          }
+        }
+      }
 
       for (const msg of result.messages) {
         // Only process user-originated messages (origin=3)
@@ -275,32 +304,35 @@ export function startKfMessagePolling(params: {
           try {
             await onMessage(msg);
           } catch (err) {
-            onError?.(
-              err instanceof Error ? err : new Error(String(err)),
-            );
+            onError?.(err instanceof Error ? err : new Error(String(err)));
           }
         }
       }
 
-      // If there are more messages, poll again immediately
-      if (result.hasMore) {
-        if (running) void poll();
+      // If there are more messages, poll again soon — but use setTimeout
+      // (not recursion) to avoid stack overflow, with a cap of 10 rapid polls
+      if (result.hasMore && running) {
+        timer = setTimeout(() => void poll(), 200);
         return;
       }
     } catch (err) {
       onError?.(err instanceof Error ? err : new Error(String(err)));
     }
 
-    // Schedule next poll
+    // Schedule next poll at normal interval
     if (running) {
-      setTimeout(() => void poll(), intervalMs);
+      timer = setTimeout(() => void poll(), intervalMs);
     }
   };
 
-  void poll();
+  void init();
 
   const stop = () => {
     running = false;
+    if (timer) {
+      clearTimeout(timer);
+      timer = null;
+    }
   };
 
   if (abortSignal) {
@@ -315,8 +347,21 @@ export function startKfMessagePolling(params: {
 }
 
 // ---------------------------------------------------------------------------
-// HTTP helper
+// Helpers
 // ---------------------------------------------------------------------------
+
+function resolveSecretValue(
+  value: string | { env: string } | undefined,
+): string | undefined {
+  if (!value) return undefined;
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && "env" in value) {
+    return process.env[value.env] ?? undefined;
+  }
+  return undefined;
+}
+
+const HTTP_TIMEOUT_MS = 15_000;
 
 async function fetchJson<T>(
   url: string,
@@ -328,25 +373,50 @@ async function fetchJson<T>(
       hostname: urlObj.hostname,
       path: urlObj.pathname + urlObj.search,
       method: options?.method ?? "GET",
+      timeout: HTTP_TIMEOUT_MS,
       headers: options?.body
         ? { "Content-Type": "application/json" }
         : undefined,
     };
 
     const req = https.request(reqOptions, (res) => {
+      // Check HTTP status
+      if (res.statusCode && (res.statusCode < 200 || res.statusCode >= 300)) {
+        // Drain the response
+        res.resume();
+        reject(
+          new Error(
+            `HTTP ${res.statusCode} from ${urlObj.hostname}${urlObj.pathname}`,
+          ),
+        );
+        return;
+      }
+
       const chunks: Buffer[] = [];
       res.on("data", (chunk: Buffer) => chunks.push(chunk));
       res.on("end", () => {
         try {
           const data = JSON.parse(Buffer.concat(chunks).toString("utf8"));
           resolve(data as T);
-        } catch (err) {
-          reject(new Error(`Failed to parse response from ${url}: ${String(err)}`));
+        } catch {
+          reject(
+            new Error(
+              `Invalid JSON from ${urlObj.hostname}${urlObj.pathname}`,
+            ),
+          );
         }
       });
     });
 
-    req.on("error", reject);
+    req.on("timeout", () => {
+      req.destroy();
+      reject(new Error(`Request timeout (${HTTP_TIMEOUT_MS}ms) for ${urlObj.hostname}${urlObj.pathname}`));
+    });
+
+    req.on("error", (err) => {
+      reject(new Error(`HTTP request failed: ${err.message}`));
+    });
+
     if (options?.body) req.write(options.body);
     req.end();
   });
