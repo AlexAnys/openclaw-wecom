@@ -1,0 +1,54 @@
+{
+  "name": "@openclaw/wecom",
+  "version": "0.1.0",
+  "description": "OpenClaw WeCom (企业微信) channel plugin — WebSocket AI Bot + WeChat KF integration",
+  "type": "module",
+  "main": "./index.ts",
+  "dependencies": {
+    "@wecom/aibot-node-sdk": "^1.0.1",
+    "@sinclair/typebox": "0.34.48",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^20.x",
+    "typescript": "^5.8.2"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "channel": {
+      "id": "wecom",
+      "label": "WeCom",
+      "selectionLabel": "WeCom / 企业微信",
+      "docsPath": "/channels/wecom",
+      "docsLabel": "wecom",
+      "blurb": "企业微信 AI Bot (WebSocket 长连接) + 微信客服绑定，无需公网 IP。",
+      "aliases": [
+        "wxwork",
+        "wechat-work"
+      ],
+      "order": 36,
+      "quickstartAllowFrom": true
+    },
+    "install": {
+      "npmSpec": "@openclaw/wecom",
+      "localPath": "extensions/wecom",
+      "defaultChoice": "npm"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AlexAnys/openclaw-wecom.git"
+  },
+  "license": "MIT",
+  "keywords": [
+    "openclaw",
+    "wecom",
+    "wechat",
+    "企业微信",
+    "微信客服",
+    "ai-bot",
+    "websocket"
+  ]
+}
